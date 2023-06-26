@@ -1,0 +1,588 @@
+---
+title: "Análisis de la calidad del aire en España usando los niveles de PM10 y NO"
+author: "Juan Sebastian Hernandez Hernandez"
+format: html
+editor: visual
+---
+
+```{r}
+#| warning: false
+library(data.table)
+library(rgdal)
+library(dplyr)
+library(sf)
+library(raster)
+library(ggplot2)
+library(stringr)
+library(geoR)
+library(scatterplot3d)
+library(rgeos)
+library(gstat)
+library(spacetime)
+library(lattice)
+library(lubridate)
+library(rstudioapi)
+library(leaflet)
+library(RColorBrewer)
+library(leaflet.esri)
+```
+
+## Resumen
+
+En este documento se presentará un análisis espacial de la calidad del aire en España. Este análisis es basado en los niveles de PM10 y NO que reportan las estaciones a lo largo del país. Cada una de las estaciones reporta de manera diaria lo niveles de PM10 y NO. En este caso se obtiene un consolidado anual desde 2012 hasta 2013. Para cada año se tomó los niveles promedio del PM10 y NO. Para cada una de las variables se lleva a cabo un análisis espacial en con el fin de identificar el comportamiento y posibles relaciones entre los niveles reportados por cada una de las estaciones a lo largo del país. Para llevar a cabo esto fue necesario usar las estimaciones del semivariograma para cada una de las variables y llevar a cabo una estimación Kriging de los procesos espaciales mencionados anteriormente.
+
+## Calidad del aire
+
+La calidad del aire es un tema fundamental hoy en día para el desarrollo de cada una la sociedades en el mundo pues el mal estados del aire que se respira puede llevar a una alta incidencia de enfermedades de tipo respiratorio y ha llevado a que alrededor de 7millones de personas hayan sufrido de muertes prematuras cada año (UN Enviroment Programme , 2022).
+
+Cada vez que respiramos estamos introduciendo partículas en nuestro cuerpo partículas que pueden llegar a repercutir no sólo en nuestros pulmones si no también en nuestros corazón, cerebro y puede llegar a causar diferentes problemas en nuestro organismo (UN Enviroment Programme , 2022). Contar con sistemas de medición de las diferentes partículas que se encuentran presentes en el aire que respiramos y además que estos sistemas se dispongan de manera organizado a lo largo del territorio es lo ideal para poder controlar estas partículas que ponen en riesgo nuestra salud. Desafortunadamente estos sistemas de medición son bastante costosos como para ubicar un cada uno o dos kilómetros y así poder tener más controlados lo niveles de cada una de las partículas que afectan nuestra salud. No obstante y gracias a metodologías desarrolladas para el análisis de estas variables que se miden en el espacio, es posible poder conocer por medio de estimaciones lo niveles de las partículas de interés en lugares donde no se cuentan con sistemas de medición. En esta ocasión nos concentraremos en las partículas PM10 y NO y realizaremos un análisis del comportamiento de cada una de estar partículas por separado. Esto con el fin de poder dar al lector una descripción del comportamiento de estas variables en el espacio y tiempo de estudio de estudio, España 2014.
+
+## Análisis exploratorio
+
+Como es acostumbrado en todos los proyectos de análisis de datos, se presentará un análisis exploratorio de los datos; todo con el fin de brindarle al lector un panorama más claro del área de estudio, red de estaciones de medición y el comportamiento de cada una de las variables.
+
+```{r}
+#| warning: false
+
+m1 <- getData(name = "GADM", country = "Spain", level = 0)
+m1 <- m1 %>%
+  st_as_sf() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = st_area(.)) %>%
+  arrange(desc(area)) %>%
+  slice(1)
+
+airePM10 <- fread("./España/DataExtract.csv", header=T, dec=".", sep=",")
+names(airePM10) <- gsub("\\s", "_", names(airePM10))
+
+aireNO <- fread("./España/DataExtract2.csv", header=T, dec=".", sep=",")
+names(aireNO) <- gsub("\\s", "_", names(aireNO))
+
+airePM10 <- airePM10[Year %in% c(2012,2013,2014,2015,2016)]
+variables <- names(airePM10)[c(1,4,6,7,8,11,12,18,19)]
+airePM10 <- airePM10[,variables, with=FALSE]
+
+aireNO <- aireNO[Year %in% c(2012,2013,2014,2015,2016)]
+variables <- names(aireNO)[c(1,4,6,7,8,11,12,18,19)]
+aireNO <- aireNO[,variables, with=FALSE]
+
+m <- getData(name = "GADM", country = "Spain", level = 0)
+m <- m %>%
+  st_as_sf() %>%
+  st_cast("POLYGON") %>%
+  mutate(area = st_area(.)) %>%
+  arrange(desc(area)) %>%
+  slice(1)
+
+m <- m %>% st_transform(25830)
+ggplot(m) + geom_sf() + theme_bw() + coord_sf(datum = st_crs(m))
+m <- as_Spatial(m[[4]])
+```
+
+Podemos observar el área de estudio, el país de España sin islas ni cayos. Esto porque sólo estamos interesados en los niveles de PM10 y NO en el territorio principal de España, es decir el de mayor área. En la Ilustración 2 se puede observar la distribución espacial de la red de estaciones para medir las partículas en el aire. Se puede observar que esta red no se encuentra distribuida en todo España de manera uniforme ni regular pero sí podemos resaltar que se encuentran 393 estaciones distribuidas por todo España. Esa cantidad de estaciones es bastante relevante pues podríamos decir que es suficiente para poder realizar una estimación de los niveles en zonas en las que no se tiene información. Además, se pueden observar concentraciones de puntos a lo largo del área de observación lo que produce algunos huecos en los que no se cuenta con dato alguno. Esto puede llevar a producir problemas a la hora de determinar las dinámica de autocorrelación en los datos.
+
+```{r}
+
+#| warning: false
+airePM10F <- airePM10[Year=="2014",]
+airePM10F <- airePM10F[!duplicated(Air_Quality_Station_EoI_Code),]
+coordinates(airePM10F) <-  ~Longitude + Latitude
+aireNOF <- aireNO[Year=="2014",]
+aireNOF <- aireNOF[!duplicated(Air_Quality_Station_EoI_Code),]
+coordinates(aireNOF) <-  ~Longitude + Latitude
+proj4string(airePM10F) <- CRS("+proj=longlat")
+airePM10F <- spTransform(airePM10F,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+proj4string(aireNOF) <- CRS("+proj=longlat")
+aireNOF <- spTransform(aireNOF,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+filtro <- gIntersects(m,airePM10F,byid = T)
+filtro1 <- gIntersects(m,aireNOF,byid = T)
+airePM10F <- airePM10F[which(filtro),]
+aireNOF <- aireNOF[which(filtro1),]
+airePM10G <- as.geodata(airePM10F, data.col = 7)
+aireNOG <- as.geodata(aireNOF, data.col = 7)
+
+puntospm10 <- SpatialPoints(coordinates(airePM10F),CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+puntospm10 <- spTransform(puntospm10,CRS("+proj=longlat +datum=WGS84 +no_defs"))
+mapa <- leaflet(m1) %>% 
+  addTiles() %>% 
+  addPolygons() %>% 
+  addCircles(puntospm10@coords[,1],puntospm10@coords[,2],radius = 1, color = "#000000",opacity = 0.9,label=airePM10F$Air_Quality_Station_EoI_Code)
+mapa
+```
+
+El PM10 se puede definir con las partículas que se encuentran suspendidas en el aire y que cuentan con diámetros menores a 10 micras (μm). Estas partículas pueden provenir de actividades industriales, residenciales, agricultura y transporte pero también de fuentes naturales como incendios forestales, erupciones volcánicas, etc. Debido al tamaño de estas partículas cuando las inhalamos pueden depositarse en el fondo de nuestros pulmones incluso pudiendo llegar hasta nuestro torrente sanguíneo. De estas partículas podremos las PM2.5, pues son partículas con un tamaño menor a 2.5 micras y que incluso pueden entrar por nuestra piel y causar daños bastante serios en nuestro sistema (Liao Z, 2019).
+
+El NO es un compuesto que se oxida en el aire causando NO2. Este último al reaccionar con la luz del sol convirtiéndose en una fuente principal de la lluvia acida además de la formación de ozono y el smog que respiramos. En términos de salud la exposición en bajos niveles de NO puede causar irritación en los ojos, garganta y pulmones y en grandes cantidades o prolongados tiempos puede llevar a causar asma y reducir la oxigenación de los tejidos corporales.
+
+```{r}
+
+#| warning: false
+par(mfrow=c(1,2),oma = c(0, 0, 2, 0))
+hist(airePM10G$data, main="",xlab="")
+boxplot(airePM10G$data)
+mtext("PM10", outer = TRUE, cex = 1.5)
+
+```
+
+Podemos ver unos gráficos descriptivos de la variable PM10 donde podemos notar que tiene un comportamiento bastante normal y centrado alrededor de 25. Claramente se pueden observar unos valores que se encuentran bastante alejados y que posiblemente provengan de estaciones cercanas a zonas industriales, agrícolas o residenciales con un alto flujo vehicular. Según la Organización Mundial de la Salud (OMS) el nivel permitido para el promedio anual de PM10 es de 20 μg/m\^3.
+
+```{r}
+
+#| warning: false
+par(mfrow=c(1,2),oma = c(0, 0, 2, 0))
+hist(aireNOG$data, main="",xlab="")
+boxplot(aireNOG$data)
+mtext("NO", outer = TRUE, cex = 1.5)
+
+```
+
+Se puede observar el comportamiento de los niveles de NO en España en el 2014. Se puede ver que la distribución de esta variable no se encuentra centrada en algún punto y que además tiene un sesgo a derecha. Esto se traduce en una mayor probabilidad de encontrar valores extremos. Según la OMS el nivel permitido para el promedio anual de NO es de 40 μg/m\^3.
+
+## Análisis espacial de PM10 y NO por separado
+
+En esta sección presentaremos el análisis espacial de la variable de interés PM10. Inicialmente se presentarán gráficos para observar si existe alguna tendencia en el espacio y en tal caso de identificarla tenerla presente en los análisis que siguen.
+
+se pueden observar los gráficos de la variable contra cada una de las coordenadas y un gráfico donde se parte en cuartiles la variable y se gráfica en el mapa con el de observar si hay alguna acumulación de datos en lugares específicos. En dicha gráfica pareciera no haber una relación entre los datos y su ubicación, es decir pareciera el que promedio es constante en todo el área de estudio. Esto lo tendremos en cuenta a la hora de modelar el semivariograma.
+
+```{r}
+
+#| warning: false
+plot(airePM10G)
+
+```
+
+se puede observar que los datos con valores mayores tienden a estar al suroriente del área de estudio. Por tanto para el caso de la variable NO, antes de cualquier ajuste de la función de semivarianza se debe tener en cuenta esta tendencia y quitarla de los datos.
+
+```{r}
+
+#| warning: false
+plot(aireNOG)
+```
+
+### Estimación de la estructura de autocorrelación espacial, Semivariogrma
+
+Con el fin de conocer la estructura de autocorrelación espacial en los datos se proceden a estimar diferentes estimadores del semivariograma y así tener diferentes fuentes de información y que con ayuda de todo esto se pueda definir la función que mejor represente dicha estructura. Inicialmente presentaremos los estimadores clásicos del semivariograma y la versión resistente a datos atípicos .
+
+```{r}
+
+#| warning: false
+brk <- seq(min(dist(airePM10G$coords)),max(dist(airePM10G$coords)),length=30)
+v1 <- variog(airePM10G, pairs.min = 1000, trend = "1st", breaks = brk, max.dist = 450000)
+v12 <- variog(airePM10G, estimator.type = "modulus", pairs.min = 1000, trend = "1st", breaks = brk, max.dist = 450000)
+v2 <- variog(aireNOG, pairs.min = 1000, trend = "1st", max.dist = 450000)#, breaks = brk)
+v22 <- variog(aireNOG, estimator.type = "modulus", pairs.min = 1000, trend = "1st", max.dist = 450000)
+par(mfrow=c(2,2))
+plot(v1,main="Semivariograma Clasico PM10")
+plot(v12,main="Resistente a datos atípicos PM10")
+plot(v2,main="Semivariograma Clasico NO")
+plot(v22,main="Resistente a datos atípicos NO")
+
+```
+
+Podemos comentar que para el caso de la variable PM10 no hay una afectación tan grande por le tema de los valores atípicos, pero para la variable NO hay que resaltar dos cosas. Para la construcción del semivariograma empírico debemos quitar la tendencia que se puede observar en los datos y además se observa que sí hay un efecto en el semivariograma por la presencia de datos atípicos.
+
+Con el fin de recolectar mayor información y así poder determinar la mejor función de semivarianza se procede a calcular por medio de máxima verosimilitud la estimación de los parámetros para un modelo de ondas o hueco.
+
+```{r}
+likfit(airePM10G, trend = "1st", ini=c(40, 3200), fix.nugget = F, cov.model = "wave")
+```
+
+Estos datos que serán usados para buscar la mejor estimación de la función de samivarianza de los procesos mencionados (PM10).
+
+Para el caso de la variable NO utilizamos la misma función likfit para poder tener unos valores de referencia para la estimación del modelo. Esto no funcionó pues los valores no se acoplan ninguno a los puntos del semivariograma empírico.
+
+```{r}
+likfit(aireNOG, trend = "1st", ini=c(43, 1200), fix.nugget = F, cov.model = "wave")
+```
+
+Para el caso del PM10 y debido a la forma que se puede observar en el semivariograma empírico se propone un modelo de hueco o "wave" con pepita = 17.18294, silla=21.57606y rango de 135000.:
+
+```{r}
+
+#| warning: false
+#| message: false
+v <- variogram(Air_Pollution_Level~1,airePM10F)
+v.fitPM <- fit.variogram(v,model=vgm(21.57606,"Wav",135000,17.18294))
+plot(v,v.fitPM, main="Semivariograma Clasico PM10")
+```
+
+La suma de cuadrados de los valores estimados por medio del semivariograma empírico y los valores estimados por la función propuesta es:
+
+```{r}
+
+#| warning: false
+#| message: false
+
+aux <- variogramLine(vgm(21.57606,"Wav",135000,17.18294),dist_vector=v$dist)
+sum((v$gamma-aux$gamma)^2)
+```
+
+Para el caso del NO se ajustó ver un modelo lineal con una pepita de 20, una silla 60 y un rango de 800,000. Esto se debe a que los dos primero puntos se encuentran bastante fuera del comportamiento general y hacen que el mejor modelo sea un lineal.
+
+```{r}
+
+#| warning: false
+#| message: false
+
+v <- variogram(Air_Pollution_Level~Longitude+Latitude,aireNOF,cressie=T)
+v.fitNO <- fit.variogram(v,model=vgm(60,"Lin",800000,20))
+plot(v,v.fitNO)
+
+```
+
+La suma de cuadrados de los valores estimados por medio del semivariograma empírico y los valores estimados por la función propuesta es:
+
+```{r}
+
+#| warning: false
+#| message: false
+
+aux <- variogramLine(vgm(60,"Lin",800000,20),dist_vector=v$dist)
+sum((v$gamma-aux$gamma)^2)
+```
+
+### Kriging
+
+Se simulan 50,000 puntos de manera regular dentro del mapa de España. Una vez se generan estos puntos de se debe garantizar que las coordenadas de estos puntos y las del objeto inicial tengan las mismas referencias. Después se procede por medio de la función Krige del paquete gstat y se realiza la estimación; la cuál da como resultado el valor de la variable estimada en cada uno de los puntos y además la varianza de cada uno de los puntos:
+
+```{r}
+
+#| warning: false
+#| message: false
+
+puntos <- sp::spsample(m, n = 50000, type = "regular")
+coordinates(puntos) ~ x1 + x2
+colnames(puntos@coords) <- c("Longitude", "Latitude")
+puntos <- spTransform(puntos,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+plot(puntos, main="Malla de puntos")
+krg <- krige(formula=Air_Pollution_Level~1,locations=airePM10F,newdata=puntos,model=v.fitPM)
+spplot(krg,c("var1.pred","var1.var"), 
+       names.attr=c("Predicción Kriging del PM10","Varianza de la predicción Krigind del PM10"), as.table = TRUE)
+krgNO <- krige(formula=Air_Pollution_Level~Longitude+Latitude,locations=aireNOF,newdata=puntos,model=v.fitNO)
+spplot(krgNO,c("var1.pred","var1.var"), 
+       names.attr=c("Predicción Kriging del NO","Varianza de la predicción Krigind del NO"), as.table = TRUE)
+
+```
+
+![](http://127.0.0.1:55606/chunk_output/s/0E274C03/cw5pnpxbtepbc/000016.png)
+
+# Kriging espacio tiempo
+
+Ahora se procederá a mostrar un análisis teniendo en cuenta no sólo las ubicaciones de las estaciones si no también el hecho de que contamos con observaciones anuales desde 2012 hasta el 2016. Es decir que sólo contamos con observaciones de años consecutivos y es una observación por año. Siguiendo la metodología del kriging espacio tiempo tenemos que primero ajustar nuestros datos a un modelo de covarianza que de explicación suficiente de la dinámica espacio temporal de nuestros datos.
+
+```{r}
+
+#| warning: false
+#| message: false
+
+airePM10 <- fread("./España/DataExtract.csv", header=T, dec=".", sep=",")
+names(airePM10) <- gsub("\\s", "_", names(airePM10))
+airePM10 <- airePM10[Year %in% c(2012,2013,2014,2015,2016)]
+variables <- names(airePM10)[c(1,4,6,7,8,11,12,18,19)]
+airePM10 <- airePM10[,variables, with=FALSE]
+airePM10 <- airePM10[!is.na(Air_Pollution_Level),]
+eliminarPM10 <- which(duplicated(airePM10,by=c("Year","Air_Quality_Station_EoI_Code")))
+airePM10 <- airePM10[-eliminarPM10,]
+airePM10Sp <- airePM10
+coordinates(airePM10Sp) <-  ~Longitude + Latitude
+proj4string(airePM10Sp) <- CRS("+proj=longlat")
+airePM10Sp <- spTransform(airePM10Sp,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+filtro <- gIntersects(m,airePM10Sp,byid = T)
+airePM10Sp <- airePM10Sp[which(filtro),]
+airePM10 <- data.frame(airePM10Sp) %>% data.table()
+
+airePM10 <- airePM10[order(Air_Quality_Station_EoI_Code,Year),]
+filtro <- airePM10[,(A=length(Country)),by=c("Air_Quality_Station_EoI_Code")]
+filtro <- filtro[V1==5,]$Air_Quality_Station_EoI_Code 
+airePM10 <- airePM10[Air_Quality_Station_EoI_Code %in% filtro,] 
+
+airePM10Sp <- airePM10
+coordinates(airePM10Sp) <-  ~Longitude + Latitude
+proj4string(airePM10Sp) <- CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs")
+
+```
+
+## Ajuste de modelo de covarianza
+
+Para el ajuste del modelo de covarianza a nuestros datos, es indispensable definir las funciones que se van a ajustar y a cada una de las funciones se les debe verificar el rango sobre el cual la función se encuentre definida. Esto debido a que, dados unos datos observados las funciones de covarianza no van a ajustarse de la mejor manera sin antes revisar los rangos de sobre los cuales los parámetros pueden variar.
+
+Exponencial espacio-tiempo:
+
+Z = θ_1\^2\*exp⁡{-h/θ_2 -u/θ_3 }
+
+Donde p es el vector de parámetros (θ_1,θ_2,θ_3)
+
+Z = θ_1\^2\*exp⁡〖{-(h/θ_2 )\^2-(u/θ_3 )\^2 } 〗
+
+Donde p es el vector de parámetros (θ_1,θ_2,θ_3)
+
+```{r}
+exp_esp_temp=function(h,u,p){((p[1])^2)*exp(-h/p[2]-u/p[3])}
+gauss_esp_temp=function(h,u,p){(p[1]^2)*exp(-(h/p[2])^2-(u/p[3])^2)}
+```
+
+Se pueden observar los rangos sobre los cuales se puso a correr la función optim con el fin de encontrar los valores que minimicen la función de log-verosimilitud
+
+|             |       |      |       |      |      |      |
+|-------------|-------|------|-------|------|------|------|
+| Modelo      | θ_1   | θ_1  | θ_2   | θ_2  | θ_3  | θ_3  |
+| Rango       | min.  | máx. | min.  | máx. | min. | máx. |
+| Exponencial | 0.975 | 1.2  | 0.001 | 5000 | 0.01 | 2    |
+| Gaussiano   | 0.875 | 1.2  | 0.001 | 5500 | 0.01 | 1.35 |
+
+## Resultados del proceso de ajuste de los modelos de covarianza
+
+Después de haber puesto ambas funciones dentro de los parámetros presentados en la anterior Tabla se obtienen los resultados de los valores de los parámetros que minimizan la función de log-verosimilitud. Esto se llevo a cabo usando la función optim.
+
+```{r}
+#| warning: false
+#| message: false
+
+distPM <- as.matrix(dist(coordinates(airePM10Sp)))
+distT <- as.matrix(dist(airePM10Sp$Year))
+
+LV<-function(p,h,u,modelo,z)
+{
+  0.5*(length(z)*log(2*pi)+log(det(modelo(h,u,p)))+t(z)%*%solve(modelo(h,u,p))%*%z)
+}
+
+exp_esp_temp=function(h,u,p){((p[1])^2)*exp(-h/p[2]-u/p[3])}
+gauss_esp_temp=function(h,u,p){(p[1]^2)*exp(-(h/p[2])^2-(u/p[3])^2)}
+cressie1=function(h,u,p){(p[1]^2/((p[2]^2*u^2+1)))*exp(-(p[3]^2*h^2)/(p[2]^2*u^2+1))}
+Gneiting1=function(h,u,p){p[1]^2/((p[2]*u^(2*p[3])+1)^(p[4]))*exp(-(p[6]*h^(2*p[5]))/((p[2]*u^(2*p[3])+1)^(p[4]*p[5])))}
+
+#############    exp_esp_temp  ##################
+lo <- c(0.975,0.001,0.01)                                                       #cotas inferiores
+hi <- c(1.2,5000,2)                                                       #cotas superiores
+p0 <- c(1,375,1)                                                            #valores iniciales
+
+# estima=optim(p0,LV,h=distPM,u=distT,modelo=exp_esp_temp,z=airePM10Sp$Air_Pollution_Level,hessian = T,lower = lo,upper = hi,method = "L-BFGS-B")
+# $par
+# [1]    1.2 5000.0    2.0
+# 
+# $value
+# [1] 86876.06
+# 
+# $counts
+# function gradient 
+# 12       12 
+# 
+# $convergence
+# [1] 0
+# 
+# $message
+# [1] "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
+# 
+# $hessian
+# [,1]       [,2]        [,3]
+# [1,] 3.540966e+05 7.16912291 20205.19869
+# [2,] 7.169123e+00 0.00142245     1.35132
+# [3,] 2.020520e+04 1.35131995 15335.19126
+
+#################################################
+
+#############    gauss_esp_temp  ##################
+lo <- c(0.875,0.001,0.01)                                                       #cotas inferiores
+hi <- c(1.20,5500,1.35)                                                       #cotas superiores
+p0 <- c(1,1000,1)                                                            #valores iniciales
+# estima=optim(p0,LV,h=distPM,u=distT,modelo=gauss_esp_temp,z=airePM10Sp$Air_Pollution_Level,hessian = T,lower = lo,upper = hi,method = "L-BFGS-B")
+# $par
+# [1]    1.200 2301.041    1.350
+# 
+# $value
+# [1] 156858.3
+# 
+# $counts
+# function gradient 
+# 15       15 
+# 
+# $convergence
+# [1] 0
+# 
+# $message
+# [1] "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH"
+# 
+# $hessian
+# [,1]        [,2]         [,3]
+# [1,]  6.454769e+05 -0.20656807  31474.25253
+# [2,] -2.065681e-01  0.03053719     28.18267
+# [3,]  3.147425e+04 28.18266512 198716.07627
+################################################################################
+```
+
+Ya con los valores de la función estimados, procedemos a mostrar cada una de las superficies que se forman para que el lector tenga idea de los modelos de covarianza ajustados.
+
+```{r}
+
+#| warning: false
+#| message: false
+
+
+p1 <- c(1.2,5000,2.0)
+p2 <- c(1.2,2301.041,1.35)
+
+x <- seq(min(distPM),max(distPM),length=1000)
+y <- seq(min(distT),max(distT),length=100)
+z <- outer(x, y, exp_esp_temp,p=p1)
+z[is.na(z)] <- 1
+op <- par(bg = "white")
+persp(x, y, z, theta = 30, phi = 20, expand = 0.5, col = "lightblue", main="Modelo exponencial")
+
+x <- seq(min(distPM),max(distPM),length=1000)
+y <- seq(min(distT),max(distT),length=100)
+z <- outer(x, y, gauss_esp_temp,p=p2)
+z[is.na(z)] <- 1
+op <- par(bg = "white")
+persp(x, y, z, theta = 30, phi = 20, expand = 0.5, col = "lightblue", main="Modelo gaussiano")
+
+```
+
+Una vez se tiene la relación espaciotemporal de los datos definidas en las funciones de covarianza ya se puede pasar a realizar la estimación en puntos (espacio-tiempo) no observados por medio de la metodología denominada Kriging.
+
+El proceso de estimación sigue la siguiente lógica:
+
+1.  Se generan de manera aleatoria los puntos que se van a estimar tanto en el espacio como en el tiempo.
+
+2.  Se le asigna a cada uno de los puntos en el espacio generados el sistema de coordenadas que ya se viene usando
+
+3.  Para cada una de las funciones de covarianza presentadas anteriormente se calcula la matriz de varianzas y covarianzas
+
+4.  Para cada uno de los nuevos puntos deseados en cada uno de los tiempos especificados se calcula la matriz de varianzas y covarianzas usando las funciones ya ajustadas
+
+5.  Se calculan los lambdas asociados a cada uno de los nuevos puntos en el espacio-tiempo que deseamos predecir
+
+6.  Se calculan las varianzas del error de predicción para cada uno de los puntos a predecir
+
+7.  Se calculan los valores de los puntos en el espacio-tiempo
+
+Este proceso se programo con el fin de mostrar el paso a paso y así evidenciar que se entiende todo de fondo:
+
+```{r}
+# set.seed(41684)
+# puntos <- sp::spsample(m, n = 200, type = "regular")
+# coordinates(puntos) ~ x1 + x2
+# colnames(puntos@coords) <- c("Longitude", "Latitude")
+# puntos <- spTransform(puntos,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+# plot(m)
+# plot(puntos, main="Malla de puntos",add=T)
+# T0 = rep(2013.5,length(puntos))
+# 
+# lambdas1 <- list()
+# lambdas2 <- list()
+# Varianzas1 <- NULL
+# Varianzas2 <- NULL
+# sigma1 <- exp_esp_temp(distPM,distT,p1)
+# sigma2 <- gauss_esp_temp(distPM,distT,p2)
+# 
+# for(j in 1:length(puntos))
+# {
+#   distSPT0 <- as.matrix(dist(rbind(coordinates(airePM10Sp),coordinates(puntos)[j,])))
+#   distT0 <- as.matrix(dist(c(airePM10Sp$Year,T0[j])))
+#   sigma01 <- exp_esp_temp(distSPT0,distT0,p1)
+#   sigma02 <- gauss_esp_temp(distSPT0,distT0,p2)
+#   aux <- (dim(distPM)[1]+1):dim(distSPT0)[1]
+#   
+#   lambdas1[[j]] <- solve(sigma1)%*%sigma01[aux,-aux]
+#   lambdas2[[j]] <- solve(sigma2)%*%sigma02[aux,-aux]
+#   print(j)
+#   Varianzas1[j] <- sigma1[1,1]-t(sigma01[aux,-aux])%*%solve(sigma1)%*%sigma01[aux,-aux]
+#   Varianzas2[j] <- sigma2[1,1]-t(sigma02[aux,-aux])%*%solve(sigma2)%*%sigma02[aux,-aux]
+#   # lambdas1 <- lambdas1[-which(sapply(lambdas1, is.null))]
+#   # lambdas2 <- lambdas2[-which(sapply(lambdas2, is.null))]
+# }
+# z01 <- NULL
+# z02 <- NULL
+# for(i in 1:length(lambdas1))
+# {
+#   z01[i] <- t(lambdas1[[i]])%*%airePM10Sp$Air_Pollution_Level
+#   z02[i] <- t(lambdas2[[i]])%*%airePM10Sp$Air_Pollution_Level
+# }
+```
+
+## Usando gstats
+
+Anteriomente y con el fin de presentar el paso a paso para realizar la estiación kriging se contruyo esa parte de código. Ahora vamos a mostrar el procedimiento usan las funciones del paquete gstats. Esto pues para poder dar una idea gráfica del proceso, debido a que con el anterior código toma demasiado tiempo.
+
+Preparación de los datos en un objeto ST para poder ser leído por las funciones del paquete gstats
+
+```{r}
+
+#| warning: false
+#| message: false
+pm10aux <- airePM10
+pm10aux <- data.frame(airePM10Sp) %>% data.table()
+pm10aux <- pm10aux[order(Year),]
+estaciones <- SpatialPoints(pm10aux[!duplicated(Air_Quality_Station_EoI_Code),.(Longitude,Latitude)],CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+tiempos <- ymd(pm10aux$Year,truncated =2L)
+# endtiempo <- ymd(year(tiempos)+1,truncated =2L)
+PM10 <- data.frame(PM10=pm10aux$Air_Pollution_Level)
+
+tiempos2 <- unique(tiempos)
+PM10 <- data.frame(values=PM10$PM10)
+
+STObj2 <- STFDF(sp = estaciones,
+                time = tiempos2,
+                data = PM10)
+  
+
+```
+
+Variograma empírico y ajuste de un modelo separable huevo "Wave". Después de un análisis algo más fácil y rápido con esta función procedemos a presentar como mejor modelo un Wave "huevo" con los siguiente parametros
+
+```{r}
+
+#| warning: false
+#| message: false
+
+var1 <- variogramST(values~1,data=STObj2,assumeRegular = TRUE, tlags=0:5)
+sepVgm <- vgmST(stModel = "separable",
+                space = vgm(1.2, "Wav", 88000, nugget = 0.1),
+                time = vgm(1.2, "Wav", 366*2, nugget = 0.1),
+                sill = 20)
+sepVgm
+sepVgm <- fit.StVariogram(var1, sepVgm)
+plot(var1,sepVgm,all=T,wireframe=T)
+
+
+```
+
+Con el fin de realizar la predicción kriging del espacio tiempo, presentamos entonces al igual que en el sólo kriging espacial los puntos a ser predichos y cada uno de los tiempos que se van a predecir. Se debe construir un objeto ST para poder usar la funciones:
+
+```{r}
+
+set.seed(41684)
+puntos <- sp::spsample(m, n = 20000, type = "regular")
+coordinates(puntos) ~ x1 + x2
+colnames(puntos@coords) <- c("Longitude", "Latitude")
+puntos <- spTransform(puntos,CRS("+proj=utm +zone=30 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"))
+plot(m)
+plot(puntos, main="Malla de puntos",add=T)
+tiempo_pred <- as.Date("2012-01-01") + c(50,366*2) #c(366,365*2+1)
+tiempo_pred
+
+puntoST <- STF(sp=puntos,time = tiempo_pred)
+
+```
+
+Y como resultado presentamos la predicción Kriging para 200 puntos en españa y las fechas "2012-02-20" y "2014-01-02" junto con el resultado de las varianzas estimadas para cada tiempo y espacio.
+
+```{r}
+
+krgST <- krigeST(values~1,data=STObj2,newdata = puntoST, modelList = sepVgm, computeVar=TRUE)
+
+stplot(krgST, main = "Predicción (PM10)")
+stplot(krgST[,,"var1.var"], main = "Varianza del error de predicción (PM10)")  
+
+grafvar <- SpatialPixelsDataFrame(krgST,data.frame(var.pred=krgST@data[,1]))
+grafpred <- SpatialPixelsDataFrame(krgST,data.frame(var.pred=krgST@data[,2]))
+plot(grafpred,main="Predicción (PM10)")
+plot(grafvar, main = "Varianza del error de predicción (PM10)")
+
+
+```
+
+## Referencias
+
+Liao Z, N. J. (2019). The impact of particulate matter (PM2.5) on skin barrier revealed by transcriptome analysis: Focusing on cholesterol metabolism. Toxicology Reports, 7:1:9. doi:10.1016/j.toxrep.2019.11.014. PMID: 31867221; PMCID: PMC6906712
+
+UN Enviroment Programme . (30 de August de 2022). Pollution Action Note -- Data you need to know. Obtenido de https://www.unep.org: https://www.unep.org/interactive/air-pollution-note/?gclid=Cj0KCQiAx6ugBhCcARIsAGNmMbhoIVqshGc1XSZUBuJdH_HotIKEuVmJdD6LQ2G2Os5sf-hMvGidyVYaArwZEALw_wcB
